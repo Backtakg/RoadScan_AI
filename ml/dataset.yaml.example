@@ -1,0 +1,12 @@
+# Copy to dataset.yaml after creating the real labelled dataset.
+# Keep test images separated by drive/route to prevent frame leakage.
+path: ./dataset
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: pothole
+
+# Optional external manifest for condition-aware evaluation:
+# ml/test_conditions.json
