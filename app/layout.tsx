@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import './overrides.css'
 
 export const metadata: Metadata = {
   title: 'RoadScan AI — Road Inspection',
