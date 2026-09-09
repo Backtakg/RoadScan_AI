@@ -57,6 +57,27 @@ class HistoryStore:
         if row is None: return None
         item = dict(row); item["analytics"] = json.loads(item.pop("analytics_json")); item["events"] = json.loads(item.pop("events_json")); item["route"] = json.loads(item.pop("route_json")); return item
 
+    def compare(self, first_id: str, second_id: str) -> dict[str, Any] | None:
+        first, second = self.get(first_id), self.get(second_id)
+        if first is None or second is None: return None
+        def delta(a: float | int | None, b: float | int | None) -> float | None:
+            if a is None or b is None: return None
+            return round(float(b) - float(a), 3)
+        fscore, sscore = first["analytics"].get("conditionScore"), second["analytics"].get("conditionScore")
+        fpkm, spkm = first["analytics"].get("potholesPerKm"), second["analytics"].get("potholesPerKm")
+        return {
+            "first": first,
+            "second": second,
+            "delta": {
+                "potholes": delta(first["potholes"], second["potholes"]),
+                "potholesPerKm": delta(fpkm, spkm),
+                "conditionScore": delta(fscore, sscore),
+                "routeDistanceM": delta(first["route_distance_m"], second["route_distance_m"]),
+                "confidencePercent": delta(first["analytics"].get("confidencePercent"), second["analytics"].get("confidencePercent")),
+            },
+            "interpretation": "Improved" if sscore is not None and fscore is not None and sscore > fscore else "Worsened" if sscore is not None and fscore is not None and sscore < fscore else "No score change",
+        }
+
     def delete(self, inspection_id: str) -> bool:
         with self._connect() as conn:
             cursor = conn.execute("DELETE FROM inspections WHERE id = ?", (inspection_id,)); conn.commit(); return cursor.rowcount > 0
