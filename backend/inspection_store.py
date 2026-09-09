@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from math import hypot
 from typing import Any
 
 
@@ -18,15 +17,25 @@ class PotholeEvent:
     severity: str
     evidence: str = "camera_frame"
 
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 class InspectionStore:
-    """In-memory event store for the prototype. Replace with SQLite/Postgres later."""
+    """In-memory inspection events. Replace with SQLite/Postgres for persistence."""
 
     def __init__(self) -> None:
         self.events: dict[int, PotholeEvent] = {}
         self.sequence = 0
 
-    def upsert(self, track_id: int, detection: dict[str, Any], latitude: float | None, longitude: float | None, timestamp: str | None) -> PotholeEvent:
+    def upsert(
+        self,
+        track_id: int,
+        detection: dict[str, Any],
+        latitude: float | None,
+        longitude: float | None,
+        timestamp: str | None,
+    ) -> tuple[PotholeEvent, bool]:
         now = timestamp or datetime.now(timezone.utc).isoformat()
         if track_id in self.events:
             event = self.events[track_id]
@@ -35,20 +44,39 @@ class InspectionStore:
             event.timestamp = now
             event.latitude = latitude
             event.longitude = longitude
-            return event
+            return event, False
+
         self.sequence += 1
         confidence = float(detection["confidence"])
         severity = "high" if confidence >= 0.75 else "medium" if confidence >= 0.5 else "low"
-        event = PotholeEvent(f"PTH-{self.sequence:04d}", track_id, now, latitude, longitude, confidence, detection["bbox"], severity)
+        event = PotholeEvent(
+            event_id=f"PTH-{self.sequence:04d}",
+            track_id=track_id,
+            timestamp=now,
+            latitude=latitude,
+            longitude=longitude,
+            confidence=confidence,
+            bbox=detection["bbox"],
+            severity=severity,
+        )
         self.events[track_id] = event
-        return event
+        return event, True
 
     def summary(self) -> dict[str, int]:
         values = list(self.events.values())
-        return {"total": len(values), "high": sum(e.severity == "high" for e in values), "medium": sum(e.severity == "medium" for e in values), "low": sum(e.severity == "low" for e in values)}
+        return {
+            "total": len(values),
+            "high": sum(e.severity == "high" for e in values),
+            "medium": sum(e.severity == "medium" for e in values),
+            "low": sum(e.severity == "low" for e in values),
+        }
 
     def list_events(self) -> list[dict[str, Any]]:
-        return [asdict(event) for event in self.events.values()]
+        return [event.to_dict() for event in self.events.values()]
+
+    def reset(self) -> None:
+        self.events.clear()
+        self.sequence = 0
 
 
 store = InspectionStore()
