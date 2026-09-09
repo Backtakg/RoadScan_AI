@@ -25,7 +25,7 @@ CONFIDENCE = float(os.getenv("ROADSCAN_CONFIDENCE", "0.35"))
 EVIDENCE_DIR = os.getenv("ROADSCAN_EVIDENCE_DIR", "backend/data/evidence")
 os.makedirs(EVIDENCE_DIR, exist_ok=True)
 
-app = FastAPI(title="RoadScan AI Vision API", version="0.8.0")
+app = FastAPI(title="RoadScan AI Vision API", version="0.9.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.mount("/evidence", StaticFiles(directory=EVIDENCE_DIR), name="evidence")
 _model: YOLO | None = None
@@ -102,6 +102,8 @@ def analytics() -> dict[str, Any]: return store.analytics()
 @app.post("/history/start")
 def history_start() -> dict[str, Any]:
     global _inspection_started_at, _active_frames, _model
+    if store.list_events() or store.route_data()["points"]:
+        archive_current_inspection()
     store.reset(); _model = None; _active_frames = 0
     _inspection_started_at = datetime.now(timezone.utc).isoformat()
     return {"status":"started","startedAt":_inspection_started_at}
@@ -120,6 +122,12 @@ def history_list(limit: int = 50) -> dict[str, Any]: return {"inspections": hist
 
 @app.get("/history/trends")
 def history_trends(limit: int = 20) -> dict[str, Any]: return {"trends": history.trends(limit)}
+
+@app.get("/history/compare")
+def history_compare(first: str, second: str) -> dict[str, Any]:
+    comparison = history.compare(first, second)
+    if comparison is None: raise HTTPException(status_code=404, detail="One or both inspections were not found")
+    return comparison
 
 @app.get("/history/{inspection_id}")
 def history_detail(inspection_id: str) -> dict[str, Any]:
