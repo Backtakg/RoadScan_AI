@@ -30,14 +30,7 @@ class InspectionStore:
         self.sequence = 0
         self.route: list[dict[str, Any]] = []
 
-    def upsert(
-        self,
-        track_id: int,
-        detection: dict[str, Any],
-        latitude: float | None,
-        longitude: float | None,
-        timestamp: str | None,
-    ) -> tuple[PotholeEvent, bool]:
+    def upsert(self, track_id: int, detection: dict[str, Any], latitude: float | None, longitude: float | None, timestamp: str | None) -> tuple[PotholeEvent, bool]:
         now = timestamp or datetime.now(timezone.utc).isoformat()
         if track_id in self.events:
             event = self.events[track_id]
@@ -47,21 +40,11 @@ class InspectionStore:
             event.latitude = latitude
             event.longitude = longitude
             return event, False
-
         self.sequence += 1
         confidence = float(detection["confidence"])
-        # This is an AI confidence band, not an engineering assessment of pothole severity.
+        # AI confidence band, not engineering severity.
         severity = "high" if confidence >= 0.75 else "medium" if confidence >= 0.5 else "low"
-        event = PotholeEvent(
-            event_id=f"PTH-{self.sequence:04d}",
-            track_id=track_id,
-            timestamp=now,
-            latitude=latitude,
-            longitude=longitude,
-            confidence=confidence,
-            bbox=detection["bbox"],
-            severity=severity,
-        )
+        event = PotholeEvent(f"PTH-{self.sequence:04d}", track_id, now, latitude, longitude, confidence, detection["bbox"], severity)
         self.events[track_id] = event
         return event, True
 
@@ -75,11 +58,7 @@ class InspectionStore:
     def add_route_point(self, latitude: float | None, longitude: float | None, timestamp: str | None) -> None:
         if latitude is None or longitude is None:
             return
-        point = {
-            "latitude": float(latitude),
-            "longitude": float(longitude),
-            "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
-        }
+        point = {"latitude": float(latitude), "longitude": float(longitude), "timestamp": timestamp or datetime.now(timezone.utc).isoformat()}
         if self.route:
             previous = self.route[-1]
             if _distance_m(previous["latitude"], previous["longitude"], point["latitude"], point["longitude"]) < 2.0:
@@ -87,27 +66,29 @@ class InspectionStore:
         self.route.append(point)
 
     def route_data(self) -> dict[str, Any]:
-        distance_m = 0.0
-        for previous, current in zip(self.route, self.route[1:]):
-            distance_m += _distance_m(previous["latitude"], previous["longitude"], current["latitude"], current["longitude"])
-        return {
-            "points": self.route,
-            "distanceMeters": round(distance_m, 1),
-            "distanceKm": round(distance_m / 1000, 3),
-            "pointCount": len(self.route),
-        }
+        distance_m = sum(_distance_m(a["latitude"], a["longitude"], b["latitude"], b["longitude"]) for a, b in zip(self.route, self.route[1:]))
+        return {"points": self.route, "distanceMeters": round(distance_m, 1), "distanceKm": round(distance_m / 1000, 3), "pointCount": len(self.route)}
 
     def summary(self) -> dict[str, int | float]:
         values = list(self.events.values())
         route = self.route_data()
-        return {
-            "total": len(values),
-            "high": sum(e.severity == "high" for e in values),
-            "medium": sum(e.severity == "medium" for e in values),
-            "low": sum(e.severity == "low" for e in values),
-            "routePoints": route["pointCount"],
-            "routeDistanceMeters": route["distanceMeters"],
-        }
+        return {"total": len(values), "high": sum(e.severity == "high" for e in values), "medium": sum(e.severity == "medium" for e in values), "low": sum(e.severity == "low" for e in values), "routePoints": route["pointCount"], "routeDistanceMeters": route["distanceMeters"]}
+
+    def analytics(self) -> dict[str, Any]:
+        values = list(self.events.values())
+        route = self.route_data()
+        distance_km = float(route["distanceKm"])
+        total = len(values)
+        mapped = [e for e in values if e.latitude is not None and e.longitude is not None]
+        avg_conf = sum(e.confidence for e in values) / total if total else 0.0
+        density = total / distance_km if distance_km > 0 else None
+        score = max(0.0, min(100.0, 100.0 - (density * 10.0 if density is not None else 0.0)))
+        if total == 0:
+            score = None
+        hotspots = []
+        for event in mapped:
+            hotspots.append({"eventId": event.event_id, "latitude": event.latitude, "longitude": event.longitude, "confidence": round(event.confidence, 3), "band": event.severity})
+        return {"potholesPerKm": round(density, 2) if density is not None else None, "averageConfidence": round(avg_conf, 3), "confidencePercent": round(avg_conf * 100, 1), "conditionScore": round(score, 1) if score is not None else None, "conditionLabel": _condition_label(score), "mappedPotholes": len(mapped), "unmappedPotholes": total - len(mapped), "evidenceCaptured": sum(bool(e.evidence) for e in values), "hotspots": hotspots}
 
     def list_events(self) -> list[dict[str, Any]]:
         return [event.to_dict() for event in self.events.values()]
@@ -118,11 +99,22 @@ class InspectionStore:
         self.route.clear()
 
 
+def _condition_label(score: float | None) -> str:
+    if score is None:
+        return "No data"
+    if score >= 80:
+        return "Good"
+    if score >= 60:
+        return "Watch"
+    if score >= 40:
+        return "Poor"
+    return "Critical"
+
+
 def _distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     earth_radius = 6_371_000.0
     phi1, phi2 = radians(lat1), radians(lat2)
-    dphi = radians(lat2 - lat1)
-    dlambda = radians(lon2 - lon1)
+    dphi, dlambda = radians(lat2 - lat1), radians(lon2 - lon1)
     a = sin(dphi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(dlambda / 2) ** 2
     return earth_radius * 2 * asin(sqrt(max(0.0, min(1.0, a))))
 
