@@ -25,11 +25,12 @@ CONFIDENCE = float(os.getenv("ROADSCAN_CONFIDENCE", "0.35"))
 EVIDENCE_DIR = os.getenv("ROADSCAN_EVIDENCE_DIR", "backend/data/evidence")
 os.makedirs(EVIDENCE_DIR, exist_ok=True)
 
-app = FastAPI(title="RoadScan AI Vision API", version="0.7.0")
+app = FastAPI(title="RoadScan AI Vision API", version="0.8.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.mount("/evidence", StaticFiles(directory=EVIDENCE_DIR), name="evidence")
 _model: YOLO | None = None
 _inspection_started_at: str | None = None
+_active_frames = 0
 
 class FrameRequest(BaseModel):
     image: str = Field(description="Base64 JPEG/PNG data, optionally prefixed with a data URL")
@@ -58,15 +59,21 @@ def save_evidence(image: np.ndarray, event_id: str) -> str:
     if not cv2.imwrite(path, image, [cv2.IMWRITE_JPEG_QUALITY, 88]): raise RuntimeError(f"Unable to save evidence frame to {path}")
     return f"/evidence/{filename}"
 
+def archive_current_inspection() -> str | None:
+    route = store.route_data(); events = store.list_events()
+    if not events and not route["points"]: return None
+    now = datetime.now(timezone.utc).isoformat()
+    return history.save(_inspection_started_at or now, now, _active_frames, store.summary(), store.analytics(), events, route)
+
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status":"ok","model":MODEL_PATH,"model_exists":os.path.exists(MODEL_PATH),"model_loaded":_model is not None,"tracker":TRACKER_PATH,"tracker_exists":os.path.exists(TRACKER_PATH),"evidence_directory":EVIDENCE_DIR,"route_points":store.route_data()["pointCount"],"history_database":history.path}
+    return {"status":"ok","model":MODEL_PATH,"model_exists":os.path.exists(MODEL_PATH),"model_loaded":_model is not None,"tracker":TRACKER_PATH,"tracker_exists":os.path.exists(TRACKER_PATH),"evidence_directory":EVIDENCE_DIR,"route_points":store.route_data()["pointCount"],"history_database":history.path,"active_frames":_active_frames,"inspection_active":_inspection_started_at is not None}
 
 @app.post("/detect")
 def detect(request: FrameRequest) -> dict[str, Any]:
-    global _inspection_started_at
+    global _inspection_started_at, _active_frames
     if _inspection_started_at is None: _inspection_started_at = request.timestamp or datetime.now(timezone.utc).isoformat()
-    image = decode_image(request.image); started = time.perf_counter(); model = get_model()
+    image = decode_image(request.image); started = time.perf_counter(); model = get_model(); _active_frames += 1
     store.add_route_point(request.latitude, request.longitude, request.timestamp)
     results = model.track(image, conf=CONFIDENCE, tracker=TRACKER_PATH, persist=True, verbose=False)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1); detections=[]; new_events=[]
@@ -81,10 +88,10 @@ def detect(request: FrameRequest) -> dict[str, Any]:
                     try: store.set_evidence(event.event_id,save_evidence(image,event.event_id))
                     except Exception as exc: raise HTTPException(status_code=500,detail=f"Evidence capture failed: {exc}") from exc
                     new_events.append(event.to_dict())
-    return {"detections":detections,"events":store.list_events(),"newEvents":new_events,"summary":store.summary(),"analytics":store.analytics(),"route":store.route_data(),"inferenceMs":elapsed_ms,"timestamp":request.timestamp,"gps":{"latitude":request.latitude,"longitude":request.longitude},"source":"processed_camera_frame","model":MODEL_PATH,"tracker":TRACKER_PATH}
+    return {"detections":detections,"events":store.list_events(),"newEvents":new_events,"summary":store.summary(),"analytics":store.analytics(),"route":store.route_data(),"inferenceMs":elapsed_ms,"timestamp":request.timestamp,"gps":{"latitude":request.latitude,"longitude":request.longitude},"source":"processed_camera_frame","model":MODEL_PATH,"tracker":TRACKER_PATH,"frames":_active_frames}
 
 @app.get("/events")
-def events() -> dict[str, Any]: return {"events":store.list_events(),"summary":store.summary(),"analytics":store.analytics(),"route":store.route_data()}
+def events() -> dict[str, Any]: return {"events":store.list_events(),"summary":store.summary(),"analytics":store.analytics(),"route":store.route_data(),"frames":_active_frames}
 @app.get("/route")
 def route() -> dict[str, Any]: return store.route_data()
 @app.get("/summary")
@@ -92,8 +99,27 @@ def summary() -> dict[str, Any]: return store.summary()
 @app.get("/analytics")
 def analytics() -> dict[str, Any]: return store.analytics()
 
+@app.post("/history/start")
+def history_start() -> dict[str, Any]:
+    global _inspection_started_at, _active_frames, _model
+    store.reset(); _model = None; _active_frames = 0
+    _inspection_started_at = datetime.now(timezone.utc).isoformat()
+    return {"status":"started","startedAt":_inspection_started_at}
+
+@app.post("/history/complete")
+def history_complete() -> dict[str, Any]:
+    global _inspection_started_at, _active_frames, _model
+    inspection_id = archive_current_inspection()
+    if inspection_id is None: raise HTTPException(status_code=400, detail="No inspection data to archive")
+    saved = history.get(inspection_id)
+    store.reset(); _model = None; _active_frames = 0; _inspection_started_at = None
+    return {"status":"completed","id":inspection_id,"inspection":saved}
+
 @app.get("/history")
 def history_list(limit: int = 50) -> dict[str, Any]: return {"inspections": history.list(limit)}
+
+@app.get("/history/trends")
+def history_trends(limit: int = 20) -> dict[str, Any]: return {"trends": history.trends(limit)}
 
 @app.get("/history/{inspection_id}")
 def history_detail(inspection_id: str) -> dict[str, Any]:
@@ -108,10 +134,10 @@ def history_delete(inspection_id: str) -> dict[str, Any]:
 
 @app.post("/history/save")
 def history_save(frames: int = 0) -> dict[str, Any]:
-    if not store.list_events() and not store.route_data()["points"]: raise HTTPException(status_code=400, detail="No inspection data to save")
     global _inspection_started_at
+    if not store.list_events() and not store.route_data()["points"]: raise HTTPException(status_code=400, detail="No inspection data to save")
     now=datetime.now(timezone.utc).isoformat(); started=_inspection_started_at or now
-    inspection_id=history.save(started,now,frames,store.summary(),store.analytics(),store.list_events(),store.route_data())
+    inspection_id=history.save(started,now,frames or _active_frames,store.summary(),store.analytics(),store.list_events(),store.route_data())
     return {"status":"saved","id":inspection_id}
 
 @app.get("/report.pdf", response_class=Response)
@@ -123,6 +149,6 @@ def report_pdf() -> Response:
 
 @app.post("/reset")
 def reset() -> dict[str, Any]:
-    global _model,_inspection_started_at
-    store.reset(); _model=None; _inspection_started_at=None
+    global _model,_inspection_started_at,_active_frames
+    store.reset(); _model=None; _inspection_started_at=None; _active_frames=0
     return {"status":"ok","summary":store.summary(),"analytics":store.analytics(),"route":store.route_data()}
