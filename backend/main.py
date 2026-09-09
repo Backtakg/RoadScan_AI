@@ -21,7 +21,7 @@ CONFIDENCE = float(os.getenv("ROADSCAN_CONFIDENCE", "0.35"))
 EVIDENCE_DIR = os.getenv("ROADSCAN_EVIDENCE_DIR", "backend/data/evidence")
 os.makedirs(EVIDENCE_DIR, exist_ok=True)
 
-app = FastAPI(title="RoadScan AI Vision API", version="0.3.0")
+app = FastAPI(title="RoadScan AI Vision API", version="0.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -65,7 +65,6 @@ def decode_image(value: str) -> np.ndarray:
 
 
 def save_evidence(image: np.ndarray, event_id: str) -> str:
-    """Save exactly one full camera frame for a newly created unique event."""
     filename = f"{event_id}.jpg"
     path = os.path.join(EVIDENCE_DIR, filename)
     if not cv2.imwrite(path, image, [cv2.IMWRITE_JPEG_QUALITY, 88]):
@@ -83,6 +82,7 @@ def health() -> dict[str, Any]:
         "tracker": TRACKER_PATH,
         "tracker_exists": os.path.exists(TRACKER_PATH),
         "evidence_directory": EVIDENCE_DIR,
+        "route_points": store.route_data()["pointCount"],
     }
 
 
@@ -91,6 +91,7 @@ def detect(request: FrameRequest) -> dict[str, Any]:
     image = decode_image(request.image)
     started = time.perf_counter()
     model = get_model()
+    store.add_route_point(request.latitude, request.longitude, request.timestamp)
     results = model.track(image, conf=CONFIDENCE, tracker=TRACKER_PATH, persist=True, verbose=False)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
 
@@ -136,6 +137,7 @@ def detect(request: FrameRequest) -> dict[str, Any]:
         "events": store.list_events(),
         "newEvents": new_events,
         "summary": store.summary(),
+        "route": store.route_data(),
         "inferenceMs": elapsed_ms,
         "timestamp": request.timestamp,
         "gps": {"latitude": request.latitude, "longitude": request.longitude},
@@ -147,7 +149,12 @@ def detect(request: FrameRequest) -> dict[str, Any]:
 
 @app.get("/events")
 def events() -> dict[str, Any]:
-    return {"events": store.list_events(), "summary": store.summary()}
+    return {"events": store.list_events(), "summary": store.summary(), "route": store.route_data()}
+
+
+@app.get("/route")
+def route() -> dict[str, Any]:
+    return store.route_data()
 
 
 @app.get("/summary")
@@ -159,6 +166,5 @@ def summary() -> dict[str, Any]:
 def reset() -> dict[str, Any]:
     global _model
     store.reset()
-    # Reloading the YOLO object starts a fresh tracker state for the next inspection.
     _model = None
-    return {"status": "ok", "summary": store.summary()}
+    return {"status": "ok", "summary": store.summary(), "route": store.route_data()}
