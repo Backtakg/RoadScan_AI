@@ -35,15 +35,12 @@ def _segment(number: int, points: list[dict[str, Any]], events: list[dict[str, A
     latitudes = [float(p['latitude']) for p in points]
     longitudes = [float(p['longitude']) for p in points]
     center = {'latitude': sum(latitudes) / len(latitudes), 'longitude': sum(longitudes) / len(longitudes)}
-    nearby = []
+    potholes = []
     for event in events:
         if event.get('latitude') is None or event.get('longitude') is None:
             continue
-        distance = min(_distance_m(center, p) for p in points)
-        event_distance = _distance_m(center, {'latitude': event['latitude'], 'longitude': event['longitude']})
-        if event_distance <= 75:
-            nearby.append((event, event_distance))
-    potholes = [e for e, _ in nearby]
+        if _distance_m(center, {'latitude': event['latitude'], 'longitude': event['longitude']}) <= 75:
+            potholes.append(event)
     high = sum(e.get('severity') == 'high' for e in potholes)
     medium = sum(e.get('severity') == 'medium' for e in potholes)
     low = sum(e.get('severity') == 'low' for e in potholes)
@@ -56,9 +53,52 @@ def _segment(number: int, points: list[dict[str, Any]], events: list[dict[str, A
         priority = 'High'
     else:
         priority = 'Routine'
-    return {'segmentId': f'RS-{number:03d}', 'center': center, 'potholes': len(potholes), 'high': high, 'medium': medium, 'low': low, 'conditionScore': round(score, 1), 'priority': priority, 'eventIds': [e['event_id'] for e in potholes]}
+    return {
+        'segmentId': f'RS-{number:03d}', 'center': center, 'potholes': len(potholes),
+        'high': high, 'medium': medium, 'low': low, 'conditionScore': round(score, 1),
+        'priority': priority, 'eventIds': [e['event_id'] for e in potholes],
+        'events': [{'eventId': e['event_id'], 'latitude': e['latitude'], 'longitude': e['longitude'],
+                    'confidence': e.get('confidence', 0), 'confidenceBand': e.get('severity', 'low'),
+                    'evidence': e.get('evidence', ''), 'timestamp': e.get('timestamp', '')} for e in potholes],
+    }
 
 
 def repair_queue(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     order = {'Urgent': 0, 'High': 1, 'Routine': 2, 'Monitor': 3}
     return sorted(segments, key=lambda s: (order.get(s['priority'], 9), -s['potholes'], s['conditionScore']))
+
+
+def find_recurring_potholes(inspections: list[dict[str, Any]], radius_m: float = 30.0) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for inspection in inspections:
+        inspection_id = inspection.get('id', 'live')
+        for event in inspection.get('events', []):
+            if event.get('latitude') is None or event.get('longitude') is None:
+                continue
+            point = {'latitude': event['latitude'], 'longitude': event['longitude']}
+            match = next((g for g in groups if inspection_id not in g['inspectionIds'] and _distance_m(g['center'], point) <= radius_m), None)
+            if match is None:
+                groups.append({'center': point, 'inspectionIds': [inspection_id], 'events': [event]})
+            else:
+                match['events'].append(event)
+                match['inspectionIds'].append(inspection_id)
+                n = len(match['events'])
+                match['center'] = {'latitude': sum(float(e['latitude']) for e in match['events']) / n,
+                                   'longitude': sum(float(e['longitude']) for e in match['events']) / n}
+    recurring = []
+    for index, group in enumerate(groups, 1):
+        inspection_ids = list(dict.fromkeys(group['inspectionIds']))
+        if len(inspection_ids) < 2:
+            continue
+        events = group['events']
+        confidences = [float(e.get('confidence', 0)) for e in events]
+        high = sum(e.get('severity') == 'high' for e in events)
+        recurring.append({
+            'recurringId': f'RP-{index:03d}', 'center': group['center'],
+            'inspectionCount': len(inspection_ids), 'detectionCount': len(events),
+            'priority': 'Urgent' if high >= 2 or len(inspection_ids) >= 3 else 'High',
+            'averageConfidence': round(sum(confidences) / len(confidences), 3) if confidences else 0,
+            'inspectionIds': inspection_ids,
+            'eventIds': [e.get('event_id') or e.get('eventId') for e in events],
+        })
+    return sorted(recurring, key=lambda x: (-x['inspectionCount'], -x['detectionCount']))
