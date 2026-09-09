@@ -15,7 +15,7 @@ class PotholeEvent:
     confidence: float
     bbox: list[float]
     severity: str
-    evidence: str = "camera_frame"
+    evidence: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -48,6 +48,7 @@ class InspectionStore:
 
         self.sequence += 1
         confidence = float(detection["confidence"])
+        # This is an AI confidence band, not an engineering assessment of pothole severity.
         severity = "high" if confidence >= 0.75 else "medium" if confidence >= 0.5 else "low"
         event = PotholeEvent(
             event_id=f"PTH-{self.sequence:04d}",
@@ -61,6 +62,13 @@ class InspectionStore:
         )
         self.events[track_id] = event
         return event, True
+
+    def set_evidence(self, event_id: str, evidence: str) -> PotholeEvent | None:
+        for event in self.events.values():
+            if event.event_id == event_id:
+                event.evidence = evidence
+                return event
+        return None
 
     def summary(self) -> dict[str, int]:
         values = list(self.events.values())
