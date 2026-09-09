@@ -15,10 +15,10 @@ from pydantic import BaseModel, Field
 from ultralytics import YOLO
 from history_store import history
 from inspection_store import store
-from maintenance import build_segments, repair_queue
+from maintenance import build_segments, repair_queue, find_recurring_potholes
 from report_generator import build_inspection_pdf
 MODEL_PATH=os.getenv('ROADSCAN_MODEL','backend/models/best.pt'); TRACKER_PATH=os.getenv('ROADSCAN_TRACKER','backend/trackers/roadscan_bytetrack.yaml'); CONFIDENCE=float(os.getenv('ROADSCAN_CONFIDENCE','0.35')); EVIDENCE_DIR=os.getenv('ROADSCAN_EVIDENCE_DIR','backend/data/evidence'); os.makedirs(EVIDENCE_DIR,exist_ok=True)
-app=FastAPI(title='RoadScan AI Vision API',version='0.9.0'); app.add_middleware(CORSMiddleware,allow_origins=['http://localhost:3000','http://127.0.0.1:3000'],allow_credentials=True,allow_methods=['*'],allow_headers=['*']); app.mount('/evidence',StaticFiles(directory=EVIDENCE_DIR),name='evidence')
+app=FastAPI(title='RoadScan AI Vision API',version='1.0.0'); app.add_middleware(CORSMiddleware,allow_origins=['http://localhost:3000','http://127.0.0.1:3000'],allow_credentials=True,allow_methods=['*'],allow_headers=['*']); app.mount('/evidence',StaticFiles(directory=EVIDENCE_DIR),name='evidence')
 _model:YOLO|None=None; _inspection_started_at:str|None=None; _active_frames=0
 class FrameRequest(BaseModel):
  image:str=Field(description='Base64 JPEG/PNG data, optionally prefixed with a data URL'); latitude:float|None=None; longitude:float|None=None; timestamp:str|None=None
@@ -43,7 +43,15 @@ def archive_current_inspection()->str|None:
  if not events and not route['points']: return None
  now=datetime.now(timezone.utc).isoformat(); return history.save(_inspection_started_at or now,now,_active_frames,store.summary(),store.analytics(),events,route)
 def maintenance_snapshot()->dict[str,Any]:
- segments=build_segments(store.list_events(),store.route_data()); return {'segments':segments,'repairQueue':repair_queue(segments),'segmentCount':len(segments)}
+ segments=build_segments(store.list_events(),store.route_data())
+ saved=[]
+ for item in history.list(100):
+  detail=history.get(item['id'])
+  if detail is not None: saved.append(detail)
+ if store.list_events() or store.route_data()['points']:
+  saved.append({'id':'LIVE','events':store.list_events(),'route':store.route_data()})
+ recurring=find_recurring_potholes(saved)
+ return {'segments':segments,'repairQueue':repair_queue(segments),'segmentCount':len(segments),'events':store.list_events(),'route':store.route_data(),'recurringPotholes':recurring,'recurringCount':len(recurring)}
 @app.get('/health')
 def health()->dict[str,Any]: return {'status':'ok','model':MODEL_PATH,'model_exists':os.path.exists(MODEL_PATH),'model_loaded':_model is not None,'tracker':TRACKER_PATH,'tracker_exists':os.path.exists(TRACKER_PATH),'evidence_directory':EVIDENCE_DIR,'route_points':store.route_data()['pointCount'],'history_database':history.path,'active_frames':_active_frames,'inspection_active':_inspection_started_at is not None}
 @app.post('/detect')
