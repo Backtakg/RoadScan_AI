@@ -9,11 +9,13 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from ultralytics import YOLO
 
 from inspection_store import store
+from report_generator import build_inspection_pdf
 
 MODEL_PATH = os.getenv("ROADSCAN_MODEL", "backend/models/best.pt")
 TRACKER_PATH = os.getenv("ROADSCAN_TRACKER", "backend/trackers/roadscan_bytetrack.yaml")
@@ -21,7 +23,7 @@ CONFIDENCE = float(os.getenv("ROADSCAN_CONFIDENCE", "0.35"))
 EVIDENCE_DIR = os.getenv("ROADSCAN_EVIDENCE_DIR", "backend/data/evidence")
 os.makedirs(EVIDENCE_DIR, exist_ok=True)
 
-app = FastAPI(title="RoadScan AI Vision API", version="0.4.0")
+app = FastAPI(title="RoadScan AI Vision API", version="0.5.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -160,6 +162,21 @@ def route() -> dict[str, Any]:
 @app.get("/summary")
 def summary() -> dict[str, Any]:
     return store.summary()
+
+
+@app.get("/report.pdf", response_class=Response)
+def report_pdf() -> Response:
+    """Generate a PDF from the current in-memory inspection session."""
+    try:
+        pdf = build_inspection_pdf(store.list_events(), store.route_data(), EVIDENCE_DIR)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc
+    filename = f"roadscan-inspection-{time.strftime('%Y%m%d-%H%M%S')}.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/reset")
