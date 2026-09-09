@@ -1,9 +1,0 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-python-multipart==0.0.20
-ultralytics==8.3.68
-opencv-python-headless==4.11.0.86
-numpy==1.26.4
-reportlab>=4.0.4,<5
-psycopg[binary]==3.2.3
-PyYAML>=6.0
