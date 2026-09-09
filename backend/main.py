@@ -18,7 +18,7 @@ MODEL_PATH = os.getenv("ROADSCAN_MODEL", "backend/models/best.pt")
 TRACKER_PATH = os.getenv("ROADSCAN_TRACKER", "backend/trackers/roadscan_bytetrack.yaml")
 CONFIDENCE = float(os.getenv("ROADSCAN_CONFIDENCE", "0.35"))
 
-app = FastAPI(title="RoadScan AI Vision API", version="0.2.0")
+app = FastAPI(title="RoadScan AI Vision API", version="0.2.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -81,9 +81,6 @@ def detect(request: FrameRequest) -> dict[str, Any]:
     image = decode_image(request.image)
     started = time.perf_counter()
     model = get_model()
-
-    # Frames from the same live camera stream are passed consecutively with
-    # persist=True so ByteTrack can maintain IDs across frames.
     results = model.track(
         image,
         conf=CONFIDENCE,
@@ -106,28 +103,27 @@ def detect(request: FrameRequest) -> dict[str, Any]:
             confidence = float(box.conf.item())
             x1, y1, x2, y2 = [round(float(v), 1) for v in box.xyxy[0].tolist()]
             track_id = int(track_ids[index]) if index < len(track_ids) else None
+            bbox = [x1, y1, x2, y2]
 
             detection = {
                 "classId": cls_id,
                 "label": names.get(cls_id, str(cls_id)),
                 "confidence": round(confidence, 3),
-                "bbox": [x1, y1, x2, y2],
+                "bbox": bbox,
                 "trackId": track_id,
             }
             detections.append(detection)
 
             if track_id is not None:
-                event = store.upsert(
+                event, is_new = store.upsert(
                     track_id=track_id,
-                    timestamp=request.timestamp,
+                    detection={"confidence": confidence, "bbox": bbox},
                     latitude=request.latitude,
                     longitude=request.longitude,
-                    confidence=confidence,
-                    bbox=[x1, y1, x2, y2],
+                    timestamp=request.timestamp,
                 )
-                event_dict = event.to_dict()
-                if event.is_new:
-                    new_events.append(event_dict)
+                if is_new:
+                    new_events.append(event.to_dict())
 
     return {
         "detections": detections,
@@ -144,7 +140,7 @@ def detect(request: FrameRequest) -> dict[str, Any]:
 
 @app.get("/events")
 def events() -> dict[str, Any]:
-    return {"events": [event.to_dict() for event in store.list_events()], "summary": store.summary()}
+    return {"events": store.list_events(), "summary": store.summary()}
 
 
 @app.get("/summary")
